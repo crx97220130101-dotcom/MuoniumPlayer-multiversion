@@ -56,7 +56,7 @@ class ManualAutomixSelectionStaticTest {
     void pendingSelectionHasPriorityAndPauseDoesNotAutoResume() throws Exception {
         String tick = region(source(), "private void waitForPlaybackCompletion()", "private void handlePlaybackCompletion()");
         assertTrue(tick.indexOf("tryManualSelectionHandover(") < tick.indexOf("tryManualNextHandover("));
-        assertTrue(tick.indexOf("tryManualSelectionHandover(") < tick.indexOf("activePlayer.isFinished()"));
+        assertTrue(tick.indexOf("tryManualSelectionHandover(") < tick.indexOf("playbackCompleted(activePlayer)"));
         assertTrue(tick.contains("if (manualSelection != null) {"));
         assertTrue(tick.contains("&& !pauseRequested) break"));
         String handover = region(source(), "private boolean tryManualSelectionHandover(", "private void cancelManualSelection()");
@@ -131,7 +131,7 @@ class ManualAutomixSelectionStaticTest {
         assertTrue(init.indexOf("preparedPlayer = initializePlayer(") < init.indexOf("synchronized (PLAYER_STATE_LOCK)"));
         assertTrue(init.contains("accepted = isSessionUsable(targetSession)"));
         assertTrue(init.contains("AudioPlayer.releaseLater(() -> closeQuietly(preparedPlayer))"));
-        String decoder = region(cloud, "private AudioPlayer initializePlayer(", "private void notifyWaitLock()");
+        String decoder = region(cloud, "private AudioPlayer initializePlayer(", "private void notifyWaitLock(");
         assertTrue(decoder.contains("new AudioPlayer(musicFile)"));
         assertFalse(decoder.contains("CloudMusic.player ="));
         assertFalse(decoder.contains(".setAudio("));

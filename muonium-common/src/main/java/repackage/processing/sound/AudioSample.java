@@ -31,9 +31,6 @@ public class AudioSample extends SoundObject {
 	// 样品内的位置
 	protected long startFrameCountOffset = 0;
 
-	// 使isPlaying()返回true的辅助变量
-	// 调用play()之后的第二个，但音频数据尚未排队
-	private long isPlayingAtLeastUntil = 0;
 	private long playbackGeneration;
 
 	public AudioSample(int frames) {
@@ -137,20 +134,8 @@ public class AudioSample extends SoundObject {
 	 * 检查此 audiosample 当前是否正在播放。
 	 **/
 	public boolean isPlaying() {
-		// 仅依赖dataQueue.hasMore()是有问题的，因为它可以
-		// 会同时导致误报（在一瞬间返回 true
-		// dataQueue.clear()已被调用）以及假阴性
-		// 会同时产生误报（在
-		// 但尚未传输到队列中）。AudioSample类
-		// 因此，在播放时手动将isPlaying布尔值设置为true
-		// 音频数据入队后短暂返回 false，
-		// 查询播放状态，我们根据其他
-		// 检查
-		if (this.isPlaying) {
-			// 如果队列为空，则将isPlaying设置为false ，除非队列太少
-			// 开始播放时为 true、停止时为 false；而且每次
-			this.isPlaying = this.player.dataQueue.hasMore() || System.currentTimeMillis() < this.isPlayingAtLeastUntil;
-		}
+		// An empty engine queue can mean that play/seek is still waiting to run.
+		// Only stop() or the matching segment's completion may end this intent.
 		return this.isPlaying;
 	}
 
@@ -336,14 +321,13 @@ public class AudioSample extends SoundObject {
 		QueueDataCommand cmd = this.player.dataQueue.createQueueDataCommand(this.sample, startFrame, numFrames);
 		// TODO setAutoStop(true) ?
 		// 始终使用当前采样播放器
-		cmd.setCallback(new PlaybackFinishedCallback(++playbackGeneration));
+		long generation = ++playbackGeneration;
 		// TODO how to loop indefinitely??
 		// TODO 如何无限循环？？
 		// 首次播放之后*重复*的次数
 		cmd.setNumLoops(numLoops - 1);
 		// 任何负数都表示无限循环
-		this.player.getSynthesizer().queueCommand(cmd);
-		this.isPlayingAtLeastUntil = System.currentTimeMillis() + 50;
+		queuePlaybackSegment(cmd, generation);
 		this.isPlaying = true;
 	}
 
@@ -474,10 +458,18 @@ public class AudioSample extends SoundObject {
 		this.setStartFrameCountOffset();
 		// 只有queueImmediate()保证对.hasMore()的直接后续调用返回true
 		QueueDataCommand cmd = this.player.dataQueue.createQueueDataCommand(this.sample, startFrame, numFrames);
-		cmd.setCallback(new PlaybackFinishedCallback(generation));
-		this.player.getSynthesizer().queueCommand(cmd);
-		this.isPlayingAtLeastUntil = System.currentTimeMillis() + 50;
+		queuePlaybackSegment(cmd, generation);
 		this.isPlaying = true;
+	}
+
+	private void queuePlaybackSegment(QueueDataCommand command, long generation) {
+		command.setCallback(new PlaybackFinishedCallback(generation));
+		this.player.getSynthesizer().queueCommand(() -> {
+			synchronized (AudioSample.this) {
+				// A pending play can arrive after pause/stop/seek already cancelled it.
+				if (generation == playbackGeneration) command.run();
+			}
+		});
 	}
 
 	public synchronized void play() {
@@ -752,13 +744,10 @@ public class AudioSample extends SoundObject {
 	 * 下次调用 <b>play()</b> 将从暂停处继续播放。
 	 */
 	public synchronized void pause() {
-		if (this.isPlaying()) {
-			this.stop();
-			this.startFrame = this.positionFrame();
-			this.setStartFrameCountOffset();
-		} else {
-			Engine.printWarning("trying to pause an audio sample that is not playing");
-		}
+		int pausedFrame = this.frames() > 0 ? this.positionFrame() : 0;
+		this.stop();
+		this.startFrame = pausedFrame;
+		this.setStartFrameCountOffset();
 	}
 
 	protected boolean checkStartFrame(int startFrame) {

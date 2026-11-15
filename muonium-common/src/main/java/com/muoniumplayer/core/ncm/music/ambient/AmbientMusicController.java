@@ -38,7 +38,8 @@ import java.util.concurrent.ThreadLocalRandom;
  * <p><b>本仓库特有的护栏</b>（modernMP 没有）：一起听房间（网易/酷狗）与 mp-party
  * 房间内不抢歌 —— 房间按曲目本体同步，本地换歌等于整房脱队，mp-party 里起播还会
  * 被改写成「替全房点歌」；直播流活跃不杀；外部播放器镜像（SMTC/Spotify Connect）
- * 接管中不起播（起了也会被拒）。私人 FM 不拦：{@code play} 会正确收尾 FM 会话。</p>
+ * 接管中不起播（起了也会被拒）。手动选歌、暂停、私人 FM 等操作会持续让位，
+ * 直到用户显式重新启用或按环境切歌。</p>
  *
  * <p>线程契约：{@link #onClientTick} 必须在主线程（树的 client tick 就是）；搜索在
  * 工作线程跑（{@link CloudMusic#search} 同步阻塞），结果经
@@ -50,12 +51,13 @@ public final class AmbientMusicController {
     /** 两次自动触发的最小间隔，与心情是否抖动无关。 */
     private static final long COOLDOWN_MS = 20_000L;
 
-    // 防抖状态（仅主线程读写）。
+    // Tick、搜索回调与手动播放入口共用控制器锁。
     private static String lastSeenLabel;    // 上一 tick 判出的标签
     private static long   stableSinceMs;    // lastSeenLabel 首次出现的时刻
-    private static String playingLabel;     // 最近一次触发搜索的心情
+    private static String playingLabel;     // 最近一次成功交付的心情
     private static long   lastSwitchMs;     // 那次搜索发出的时刻
     private static boolean searching;       // 一次搜索在途（防重叠）
+    private static boolean suspendedByUser;
 
     /** 搜索结果防串号：心情又变过之后，旧搜索回来直接丢弃。 */
     private static long requestRevision;
@@ -73,12 +75,37 @@ public final class AmbientMusicController {
     private AmbientMusicController() {
     }
 
-    /** 清空防抖状态，让下一个稳定心情重新触发（总开关打开时调）。 */
-    public static void reset() {
+    /** 显式重新启用环境选曲时交还控制权。切换世界不会撤销用户的暂停或选歌。 */
+    public static synchronized void reset() {
+        suspendedByUser = false;
+        clearEnvironment();
+    }
+
+    private static void clearEnvironment() {
         lastSeenLabel = null;
         stableSinceMs = 0L;
         playingLabel  = null;
+        lastSwitchMs = 0L;
+        cancelSearch();
+    }
+
+    private static void cancelSearch() {
+        searching = false;
         requestRevision++;
+    }
+
+    /** 手动传输控制优先于环境选曲，包括仍在联网的环境搜索。 */
+    public static synchronized void onManualPlaybackControl() {
+        if (!suspendedByUser && AmbientSettings.isEnabled()) {
+            System.out.println("[MuoniumPlayer/Ambient] 已让位给手动播放");
+        }
+        suspendedByUser = true;
+        playingLabel = null;
+        cancelSearch();
+    }
+
+    public static synchronized boolean isSuspendedByUser() {
+        return suspendedByUser;
     }
 
     /**
@@ -87,19 +114,26 @@ public final class AmbientMusicController {
      * @param sample 树侧探针采的环境快照；{@code null} 表示当前采不到（主菜单等），
      *               直接回到「无世界」状态。
      */
-    public static void onClientTick(EnvSample sample) {
+    public static synchronized void onClientTick(EnvSample sample) {
         try {
             if (!AmbientSettings.isEnabled() || sample == null) {
                 // 关掉/没世界：作废在途搜索，回到干净状态。
-                if (searching || lastSeenLabel != null) reset();
+                if (searching || lastSeenLabel != null) clearEnvironment();
                 return;
             }
 
             String label = MoodDecider.decide(sample);
             long now = System.currentTimeMillis();
+            if (suspendedByUser) {
+                // 保留当前环境供显式「按环境切歌」使用，但不覆盖用户的播放上下文。
+                lastSeenLabel = label;
+                stableSinceMs = now;
+                return;
+            }
 
             // 记录当前标签连续保持了多久。
             if (!label.equals(lastSeenLabel)) {
+                cancelSearch();
                 lastSeenLabel = label;
                 // 房间/镜像接管中不给心情计时：出房间后第一个稳定期就能接上，
                 // 而不是把 15s 稳定期耗在根本不能起播的状态里。
@@ -129,13 +163,15 @@ public final class AmbientMusicController {
      * 「采不到环境」的提示，而不是无声无息像按键失灵。手动绕过稳定期与冷却 ——
      * 就是要立刻听当前环境的曲子。</p>
      */
-    public static void triggerNow() {
+    public static synchronized void triggerNow() {
         try {
+            if (!AmbientSettings.isEnabled()) return;
             if (searching) return;
             if (lastSeenLabel == null) {
                 DownloadDynamicIsland.showAmbientScene("还没采到环境", "进入世界后即可按环境切歌");
                 return;
             }
+            suspendedByUser = false;
             trigger(lastSeenLabel, System.currentTimeMillis());
         } catch (Throwable ignored) {
         }
@@ -147,7 +183,6 @@ public final class AmbientMusicController {
         if (keyword == null) return;
 
         searching     = true;
-        playingLabel  = label;
         lastSwitchMs  = now;
         final long ticket = ++requestRevision;
 
@@ -173,10 +208,11 @@ public final class AmbientMusicController {
     }
 
     /** 搜索结果落地（主线程）：校验 ticket、过护栏、挑曲起播。 */
-    private static void deliver(long ticket, String label, String keyword,
+    private static synchronized void deliver(long ticket, String label, String keyword,
                                 List<Music> results, Throwable error) {
-        searching = false;
         if (ticket != requestRevision) return;            // 心情已翻篇，旧结果丢弃
+        searching = false;
+        if (suspendedByUser || !AmbientSettings.isEnabled() || !label.equals(lastSeenLabel)) return;
         if (error != null) {
             System.out.println("[MuoniumPlayer/Ambient] 搜索失败(" + label + "): " + error);
             playingLabel = null;                          // 让下个稳定心情重试
@@ -199,11 +235,12 @@ public final class AmbientMusicController {
             return;
         }
         remember(results.get(idx));
+        playingLabel = label;
         System.out.println("[MuoniumPlayer/Ambient] 切歌: 心情=" + label
                 + " 关键词=" + keyword + " → " + results.get(idx).getName());
         DownloadDynamicIsland.showAmbientScene(label, results.get(idx).getName());
         // 整表起播：后续曲目（与 automix 的衔接）都在同一心情内顺延。
-        CloudMusic.play(new ArrayList<>(results), idx);
+        CloudMusic.playFromAmbient(new ArrayList<>(results), idx);
     }
 
     /**

@@ -48,6 +48,7 @@ public final class AmbientSettings {
     /** 总开关；立即落盘。 */
     public static void setEnabled(boolean value) {
         write(value, null);
+        AmbientMusicController.reset();
     }
 
     /** 稳定期毫秒（自动钳到 {@link #STABLE_MS_MIN}..{@link #STABLE_MS_MAX}）；立即落盘。 */

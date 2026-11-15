@@ -988,7 +988,8 @@ public final class ViperOverlay extends NcmSheet {
         subHeader(dialog, back(this::showEffects), () -> "环境选曲",
                 () -> "跟随身处环境（群系/天气/敌情/深浅）自动按心情选歌 · 改动即时落盘生效",
                 () -> NCMScreen.getColor(NCMScreen.ColorType.ACCENT));
-        tip(dialog, () -> AmbientSettings.isEnabled() ? PartyIcons.CHECK : PartyIcons.INFO,
+        tip(dialog, () -> AmbientSettings.isEnabled() && !AmbientMusicController.isSuspendedByUser()
+                        ? PartyIcons.CHECK : PartyIcons.INFO,
                 this::ambientStatusText, this::ambientStatusColor, () -> STATUS_TOP);
 
         final Panel body = body(dialog, () -> BODY_TOP, () -> FOOTER_H);
@@ -1036,28 +1037,24 @@ public final class ViperOverlay extends NcmSheet {
         toggle(dialog, AmbientSettings::isEnabled, () -> {
                     boolean next = !AmbientSettings.isEnabled();
                     AmbientSettings.setEnabled(next);
-                    if (next) {
-                        // 开关打开：防抖状态从零起算，让当前环境立刻进入稳定期计时，
-                        // 而不是背着上一段会话的旧 playingLabel/稳定期残值。
-                        AmbientMusicController.reset();
-                    }
                 },
                 () -> dialog.getWidth() - PAD - CARD_INSET, () -> dialog.getHeight() - 64.0,
                 () -> NCMScreen.getColor(NCMScreen.ColorType.ACCENT));
         tip(dialog, () -> PartyIcons.INFO,
-                () -> "一起听/派对房间内不会抢歌;搜索跟随当前音源平台",
+                () -> "手动播放优先 · 一起听与派对保持原队列",
                 () -> NCMScreen.getColor(NCMScreen.ColorType.SECONDARY_TEXT),
                 () -> dialog.getHeight() - 32.0);
     }
 
     private String ambientStatusText() {
-        return AmbientSettings.isEnabled()
-                ? "生效中 · 心情稳定后自动按环境换歌，一起听/派对中让路"
-                : "关闭中 · 播放完全由自己掌控";
+        if (!AmbientSettings.isEnabled()) return "关闭中 · 播放由自己掌控";
+        return AmbientMusicController.isSuspendedByUser()
+                ? "已让位 · 保持手动歌单与暂停状态"
+                : "生效中 · 心情稳定后自动按环境换歌";
     }
 
     private int ambientStatusColor() {
-        return AmbientSettings.isEnabled() ? OK_COLOR
+        return AmbientSettings.isEnabled() && !AmbientMusicController.isSuspendedByUser() ? OK_COLOR
                 : NCMScreen.getColor(NCMScreen.ColorType.SECONDARY_TEXT);
     }
 
